@@ -67,8 +67,9 @@ $on_mod(Loaded) {
 // ------------------------------------------------------------
 static constexpr int JUMP = 1;
 
-static PlayerObject* g_ghostA = nullptr;   // "click / hold" ghost
-static PlayerObject* g_ghostB = nullptr;   // "no click / release" ghost
+// 0 = P1 click ghost, 1 = P1 no-click ghost, 2 = P2 click ghost, 3 = P2 no-click ghost
+static constexpr int kGhostCount = 4;
+static PlayerObject* g_ghosts[kGhostCount] = {nullptr, nullptr, nullptr, nullptr};
 static bool g_simulating = false;
 static bool g_ghostStopped = false;        // ghost touched orb/pad/portal
 static bool g_ghostDied = false;
@@ -80,7 +81,11 @@ static float g_lastRealDt = 0.25f;
 static uint64_t g_physTick = 0;
 
 static bool isGhost(PlayerObject* p) {
-    return p && (p == g_ghostA || p == g_ghostB);
+    if (!p) return false;
+    for (auto* g : g_ghosts) {
+        if (g == p) return true;
+    }
+    return false;
 }
 
 static int msToTicks(int64_t ms) {
@@ -98,11 +103,11 @@ static bool isHoldMode(PlayerObject* p) {
     return p->m_isShip || p->m_isDart || p->m_isRobot;
 }
 static bool isTouchingOrb(PlayerObject* p) {
-    return p->m_touchingRings && p->m_touchingRings->count() > 0;
+    return p && p->m_touchingRings && p->m_touchingRings->count() > 0;
 }
 
 // ------------------------------------------------------------
-// Input state for player 1 (buffer + smart click)
+// Input state (buffer + smart click)
 // ------------------------------------------------------------
 struct BufferState {
     bool pending = false;
@@ -114,12 +119,15 @@ static BufferState g_p1, g_p2;
 
 struct SmartState {
     bool gdPressed = false;       // what GD currently thinks (P1 jump)
-    bool suppressed = false;      // user is holding but we hid it from GD
+    bool gdPressed2 = false;      // same for P2
+    bool suppressed = false;      // user is holding but we hid it from GD (P1)
+    bool suppressed2 = false;     // same for P2
     bool autoHeld = false;        // we are holding for the user (hold modes)
     bool tapRelease = false;      // release our auto-tap on the next tick
     bool pressDies = false;       // this tick: clicking now dies soon
     bool releaseDies = false;     // this tick: not clicking dies soon
     bool valid = false;           // the two flags above are fresh
+    bool p2Separate = false;      // GD has been seen sending P2 its own jump calls
     int autoClicks = 0;
     int blockedClicks = 0;
 };
@@ -130,10 +138,11 @@ static bool g_smartActiveNow = false; // set once per tick by the smart-click pa
 static void resetInputState() {
     g_p1 = {};
     g_p2 = {};
-    int a = g_smart.autoClicks, b = g_smart.blockedClicks;
+    auto keep = g_smart;
     g_smart = {};
-    g_smart.autoClicks = a;
-    g_smart.blockedClicks = b;
+    g_smart.autoClicks = keep.autoClicks;
+    g_smart.blockedClicks = keep.blockedClicks;
+    g_smart.p2Separate = keep.p2Separate; // a property of the game, not of the run
 }
 
 static void runSmartTick(GJBaseGameLayer* layer); // defined after IBPlayLayer
@@ -191,6 +200,7 @@ class $modify(IBPlayerObject, PlayerObject) {
 // GJBaseGameLayer hooks: input, buffer, ghost side-effect blockers
 // ------------------------------------------------------------
 class $modify(IBGameLayer, GJBaseGameLayer) {
+public:
     bool bufferActive() {
         if (!g_cfg.enabled) return false;
         if (m_isEditor) return false;
@@ -198,13 +208,24 @@ class $modify(IBGameLayer, GJBaseGameLayer) {
         return true;
     }
 
-public:
-    // Send a P1/P2 jump press/release straight to GD (bypasses our logic).
+    // Dual mode where one press drives both players (not split 2-player mode).
+    bool p2Mirrors() {
+        return m_gameState.m_isDualMode && !(m_levelSettings && m_levelSettings->m_twoPlayerMode);
+    }
+
+    // Send a jump press/release straight to GD (bypasses our logic).
     void sendJump(bool down, bool isPlayer1) {
         g_injecting = true;
         GJBaseGameLayer::handleButton(down, JUMP, isPlayer1);
         g_injecting = false;
         if (isPlayer1) g_smart.gdPressed = down;
+        else g_smart.gdPressed2 = down;
+    }
+
+    // Same, but also for P2 when one press drives both players.
+    void sendJumpAll(bool down) {
+        sendJump(down, true);
+        if (g_smart.p2Separate && p2Mirrors()) sendJump(down, false);
     }
 
     void handleButton(bool down, int button, bool isPlayer1) {
@@ -216,22 +237,34 @@ public:
         auto& st = isPlayer1 ? g_p1 : g_p2;
         st.held = down;
 
-        // ---- Smart Click: filter player 1's real input ----
-        if (isPlayer1 && g_smartActiveNow) {
+        // ---- Smart Click: filter the user's real input ----
+        if (g_smartActiveNow) {
             auto& s = g_smart;
-            if (down) {
-                if (s.autoHeld) {          // we were holding: the user takes over
-                    s.autoHeld = false;
-                    return;                // GD is already pressed
-                }
-                if (!s.gdPressed && s.valid && s.pressDies && !s.releaseDies) {
-                    s.suppressed = true;   // this click would kill you: ignore it
-                    s.blockedClicks++;
+            if (isPlayer1) {
+                if (down) {
+                    if (s.autoHeld) {          // we were holding: the user takes over
+                        s.autoHeld = false;
+                        return;                // GD is already pressed
+                    }
+                    if (!s.gdPressed && s.valid && s.pressDies && !s.releaseDies) {
+                        s.suppressed = true;   // this click would kill you: ignore it
+                        s.blockedClicks++;
+                        return;
+                    }
+                } else if (s.suppressed) {     // GD never saw the press
+                    s.suppressed = false;
                     return;
                 }
-            } else {
-                if (s.suppressed) {        // GD never saw the press
-                    s.suppressed = false;
+            } else if (p2Mirrors()) {
+                s.p2Separate = true;           // GD sends P2 its own calls
+                if (down) {
+                    if (s.gdPressed2) return;  // we already pressed for the user
+                    if (s.valid && s.pressDies && !s.releaseDies) {
+                        s.suppressed2 = true;
+                        return;
+                    }
+                } else if (s.suppressed2) {
+                    s.suppressed2 = false;
                     return;
                 }
             }
@@ -239,6 +272,7 @@ public:
 
         GJBaseGameLayer::handleButton(down, button, isPlayer1);
         if (isPlayer1) g_smart.gdPressed = down;
+        else g_smart.gdPressed2 = down;
 
         // ---- Input buffer bookkeeping ----
         if (!down || !bufferActive()) return;
@@ -283,7 +317,7 @@ public:
         if (!g_simulating && !m_isEditor) {
             if (g_smart.tapRelease) {
                 g_smart.tapRelease = false;
-                if (!g_p1.held && !g_smart.autoHeld) sendJump(false, true);
+                if (!g_p1.held && !g_smart.autoHeld) sendJumpAll(false);
             }
             tickBuffer(true);
             if (m_gameState.m_isDualMode) tickBuffer(false);
@@ -353,18 +387,31 @@ struct PathResult {
     int landingIndex = -1;
 };
 
+// One branch (click / no click) for both players.
+struct Run {
+    PathResult p1;
+    PathResult p2;
+    bool hasP2 = false;
+
+    // Does either player die within `horizon` ticks? (either dying ends the attempt)
+    bool diesWithin(int horizon) const {
+        if (p1.died && p1.deathIndex <= horizon) return true;
+        return hasP2 && p2.died && p2.deathIndex <= horizon;
+    }
+};
+
 class $modify(IBPlayLayer, PlayLayer) {
     struct Fields {
         Ref<CCLayer> ghostRoot;              // hidden parent for all ghosts
-        Ref<PlayerObject> ghostA;
-        Ref<PlayerObject> ghostB;
+        Ref<PlayerObject> ghosts[kGhostCount];
         Ref<CCDrawNode> draw;
         Ref<CCLabelBMFont> label;
 
         // Never leave dangling raw pointers in the globals when this layer dies.
         ~Fields() {
-            if (g_ghostA == ghostA.data()) g_ghostA = nullptr;
-            if (g_ghostB == ghostB.data()) g_ghostB = nullptr;
+            for (int i = 0; i < kGhostCount; i++) {
+                if (g_ghosts[i] == ghosts[i].data()) g_ghosts[i] = nullptr;
+            }
             g_smartActiveNow = false;
         }
     };
@@ -379,7 +426,7 @@ class $modify(IBPlayLayer, PlayLayer) {
     }
 
     void onQuit() {
-        g_ghostA = g_ghostB = nullptr;
+        for (auto& g : g_ghosts) g = nullptr;
         g_smartActiveNow = false;
         resetInputState();
         PlayLayer::onQuit();
@@ -418,11 +465,14 @@ class $modify(IBPlayLayer, PlayLayer) {
             f->draw->setZOrder(9999);
             m_objectLayer->addChild(f->draw);
         }
-        if (!f->ghostA) f->ghostA = makeGhost();
-        if (!f->ghostB) f->ghostB = makeGhost();
-        g_ghostA = f->ghostA;
-        g_ghostB = f->ghostB;
-        return f->ghostA != nullptr && f->ghostB != nullptr && f->draw != nullptr;
+        bool dual = m_gameState.m_isDualMode && m_player2;
+        int needed = dual ? kGhostCount : 2;
+        for (int i = 0; i < needed; i++) {
+            if (!f->ghosts[i]) f->ghosts[i] = makeGhost();
+            g_ghosts[i] = f->ghosts[i];
+            if (!f->ghosts[i]) return false;
+        }
+        return f->draw != nullptr;
     }
 
     static void syncMode(PlayerObject* g, PlayerObject* p) {
@@ -460,6 +510,7 @@ class $modify(IBPlayLayer, PlayLayer) {
         g->m_isGoingLeft = p->m_isGoingLeft;
         g->m_isSideways = p->m_isSideways;
         g->m_holdingButtons = p->m_holdingButtons;
+        g->m_isSecondPlayer = p->m_isSecondPlayer;
         g->m_isDead = false;
         g->setVisible(false);
     }
@@ -505,6 +556,34 @@ class $modify(IBPlayLayer, PlayLayer) {
         return r;
     }
 
+    // Simulate one branch for every active player. click=false -> nobody clicks.
+    Run runBranch(bool click, int steps) {
+        auto f = m_fields.self();
+        Run run;
+        auto p1 = m_player1;
+
+        SimInput in1 = !click ? SimInput::Release
+                     : (g_smart.gdPressed || isHoldMode(p1)) ? SimInput::Hold : SimInput::Tap;
+        run.p1 = simulate(f->ghosts[click ? 0 : 1], p1, in1, steps);
+
+        auto p2 = m_player2;
+        if (m_gameState.m_isDualMode && p2 && !p2->m_isDead && f->ghosts[2] && f->ghosts[3]) {
+            SimInput in2;
+            if (m_levelSettings && m_levelSettings->m_twoPlayerMode) {
+                // split controls: P2 follows its own finger, independent of the branch
+                in2 = g_p2.held ? SimInput::Hold : SimInput::Release;
+            } else if (!click) {
+                in2 = SimInput::Release;
+            } else {
+                bool pressed = g_smart.p2Separate ? g_smart.gdPressed2 : g_smart.gdPressed;
+                in2 = (pressed || isHoldMode(p2)) ? SimInput::Hold : SimInput::Tap;
+            }
+            run.p2 = simulate(f->ghosts[click ? 2 : 3], p2, in2, steps);
+            run.hasP2 = true;
+        }
+        return run;
+    }
+
     // ---------- drawing ----------
     static void drawPath(CCDrawNode* d, PathResult const& r, ccColor4F color, int from, int to) {
         from = std::max(from, 0);
@@ -512,8 +591,9 @@ class $modify(IBPlayLayer, PlayLayer) {
         for (int i = from; i < to; i++) d->drawSegment(r.points[i], r.points[i + 1], 1.2f, color);
     }
 
-    static void drawEnd(CCDrawNode* d, PathResult const& r) {
+    static void drawEnd(CCDrawNode* d, PathResult const& r, int drawSteps) {
         if (r.points.empty()) return;
+        if (r.died && r.deathIndex > drawSteps) return;
         auto end = r.points.back();
         if (r.died) {
             auto red = ccc4f(1.f, 0.15f, 0.15f, 1.f);
@@ -527,7 +607,6 @@ class $modify(IBPlayLayer, PlayLayer) {
     bool smartWanted() {
         if (!g_cfg.smartClick) return false;
         if (g_cfg.smartPracticeOnly && !m_isPracticeMode) return false;
-        if (m_gameState.m_isDualMode) return false; // player 1 only
         return true;
     }
 
@@ -548,12 +627,12 @@ class $modify(IBPlayLayer, PlayLayer) {
     }
 
     // ---------- smart click decision ----------
-    void applySmartClick(PlayerObject* real, PathResult const& a, PathResult const& b, int horizon) {
+    void applySmartClick(PlayerObject* real, Run const& a, Run const& b, int horizon) {
         auto layer = static_cast<IBGameLayer*>(static_cast<GJBaseGameLayer*>(this));
         auto& s = g_smart;
 
-        bool aDies = a.died && a.deathIndex <= horizon;
-        bool bDies = b.died && b.deathIndex <= horizon;
+        bool aDies = a.diesWithin(horizon);
+        bool bDies = b.diesWithin(horizon);
         bool hold = isHoldMode(real);
 
         // remembered for filtering the user's next click
@@ -568,18 +647,18 @@ class $modify(IBPlayLayer, PlayLayer) {
         if (s.gdPressed) {
             if (aDies && !bDies) {
                 // holding / jumping kills you, letting go is safe: let go
-                layer->sendJump(false, true);
+                layer->sendJumpAll(false);
                 if (g_p1.held) { s.suppressed = true; s.blockedClicks++; }
                 s.autoHeld = false;
             } else if (s.autoHeld && !g_p1.held && !bDies) {
                 // our auto-hold isn't needed anymore
-                layer->sendJump(false, true);
+                layer->sendJumpAll(false);
                 s.autoHeld = false;
             }
         } else {
             if (bDies && !aDies) {
                 // not clicking kills you, clicking is safe: click
-                layer->sendJump(true, true);
+                layer->sendJumpAll(true);
                 s.autoClicks++;
                 if (g_p1.held) {
                     s.suppressed = false;        // the user's own hold is now live
@@ -590,7 +669,7 @@ class $modify(IBPlayLayer, PlayLayer) {
                 }
             } else if (s.suppressed && g_p1.held && !aDies) {
                 // the user is still holding and it's safe now: let it through
-                layer->sendJump(true, true);
+                layer->sendJumpAll(true);
                 s.suppressed = false;
             }
         }
@@ -599,9 +678,10 @@ class $modify(IBPlayLayer, PlayLayer) {
     void releaseSmartControl() {
         auto layer = static_cast<IBGameLayer*>(static_cast<GJBaseGameLayer*>(this));
         auto& s = g_smart;
-        if (s.autoHeld && !g_p1.held) layer->sendJump(false, true);
+        if (s.autoHeld && !g_p1.held) layer->sendJumpAll(false);
         if (s.suppressed && g_p1.held) layer->sendJump(true, true); // give the user's hold back
-        s.autoHeld = s.suppressed = false;
+        if (s.suppressed2 && g_p2.held) layer->sendJump(true, false);
+        s.autoHeld = s.suppressed = s.suppressed2 = false;
         s.valid = false;
     }
 
@@ -610,7 +690,8 @@ class $modify(IBPlayLayer, PlayLayer) {
         bool smart = smartWanted();
         auto real = m_player1;
         bool alive = real && !real->m_isDead && !m_hasCompletedLevel;
-        bool usable = smart && alive && !isTouchingOrb(real);
+        bool dual = m_gameState.m_isDualMode && m_player2;
+        bool usable = smart && alive && !isTouchingOrb(real) && !(dual && isTouchingOrb(m_player2));
 
         if (!usable && g_smartActiveNow) releaseSmartControl();
         g_smartActiveNow = usable;
@@ -620,14 +701,9 @@ class $modify(IBPlayLayer, PlayLayer) {
             g_smartActiveNow = false;
             return;
         }
-        auto f = m_fields.self();
         int horizon = msToTicks(g_cfg.smartLookahead);
-
-        // A = click (or keep holding if GD is pressed), B = no click / let go
-        SimInput aInput = g_smart.gdPressed ? SimInput::Hold
-                        : (isHoldMode(real) ? SimInput::Hold : SimInput::Tap);
-        auto b = simulate(f->ghostB, real, SimInput::Release, horizon);
-        auto a = simulate(f->ghostA, real, aInput, horizon);
+        auto b = runBranch(false, horizon);
+        auto a = runBranch(true, horizon);
         applySmartClick(real, a, b, horizon);
     }
 
@@ -646,27 +722,29 @@ class $modify(IBPlayLayer, PlayLayer) {
         if (!ensureGhosts()) return;
 
         int drawSteps = msToTicks(g_cfg.trajectoryLength);
-
-        // A = click (or keep holding if GD is pressed), B = no click / let go
-        SimInput aInput = g_smart.gdPressed ? SimInput::Hold
-                        : (isHoldMode(real) ? SimInput::Hold : SimInput::Tap);
-        auto b = simulate(f->ghostB, real, SimInput::Release, drawSteps);
-        auto a = simulate(f->ghostA, real, aInput, drawSteps);
+        auto b = runBranch(false, drawSteps);
+        auto a = runBranch(true, drawSteps);
 
         auto d = f->draw.data();
-        drawPath(d, b, ccc4f(1.f, 0.3f, 0.3f, 0.85f), 0, drawSteps);
-        drawPath(d, a, ccc4f(0.3f, 1.f, 0.4f, 0.9f), 0, drawSteps);
+        auto red = ccc4f(1.f, 0.3f, 0.3f, 0.85f);
+        auto green = ccc4f(0.3f, 1.f, 0.4f, 0.9f);
+        drawPath(d, b.p1, red, 0, drawSteps);
+        drawPath(d, a.p1, green, 0, drawSteps);
+        if (b.hasP2) drawPath(d, b.p2, red, 0, drawSteps);
+        if (a.hasP2) drawPath(d, a.p2, green, 0, drawSteps);
 
         if (g_cfg.showBufferZone && g_cfg.enabled &&
-            b.landingIndex > 0 && b.landingIndex <= drawSteps &&
+            b.p1.landingIndex > 0 && b.p1.landingIndex <= drawSteps &&
             isGroundJumpMode(real) && !real->m_isOnGround) {
-            int start = b.landingIndex - msToTicks(g_cfg.bufferWindow);
+            int start = b.p1.landingIndex - msToTicks(g_cfg.bufferWindow);
             auto yellow = ccc4f(1.f, 0.9f, 0.2f, 1.f);
-            drawPath(d, b, yellow, start, b.landingIndex);
-            d->drawDot(b.points[b.landingIndex], 3.f, yellow);
+            drawPath(d, b.p1, yellow, start, b.p1.landingIndex);
+            d->drawDot(b.p1.points[b.p1.landingIndex], 3.f, yellow);
         }
-        if (b.died ? b.deathIndex <= drawSteps : true) drawEnd(d, b);
-        if (a.died ? a.deathIndex <= drawSteps : true) drawEnd(d, a);
+        drawEnd(d, b.p1, drawSteps);
+        drawEnd(d, a.p1, drawSteps);
+        if (b.hasP2) drawEnd(d, b.p2, drawSteps);
+        if (a.hasP2) drawEnd(d, a.p2, drawSteps);
     }
 
     void postUpdate(float dt) {
