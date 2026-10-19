@@ -511,6 +511,11 @@ class $modify(IBPlayLayer, PlayLayer) {
         g->m_isSideways = p->m_isSideways;
         g->m_holdingButtons = p->m_holdingButtons;
         g->m_isSecondPlayer = p->m_isSecondPlayer;
+        // platformer: the ghost keeps walking the way the real player is
+        g->m_holdingLeft = p->m_holdingLeft;
+        g->m_holdingRight = p->m_holdingRight;
+        g->m_leftPressedFirst = p->m_leftPressedFirst;
+        g->m_platformerXVelocity = p->m_platformerXVelocity;
         g->m_isDead = false;
         g->setVisible(false);
     }
