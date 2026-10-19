@@ -1,24 +1,3 @@
-// ============================================================
-//  Input Buffer v3.1 (Geode)
-//
-//  1. Input buffer: a jump tapped in the air is replayed on the
-//     physics tick you land, if it was within the buffer window.
-//     The window is counted in physics ticks (not wall-clock),
-//     so lag spikes, pausing and TPS changes don't distort it.
-//  2. Trajectory: invisible "ghost" players are cloned from you
-//     and run through GD's own physics/collision:
-//       green  = path if you click / keep holding
-//       red    = path if you don't click / let go
-//       yellow = part of the red path where a tap gets buffered
-//     Both players are simulated in dual mode, and the held
-//     left/right direction is carried over in platformer levels.
-//  3. Smart Click (uses the two paths):
-//       - your click is ignored if clicking dies and not clicking is safe
-//       - it clicks for you if not clicking dies and clicking is safe
-//       - both die, or you're on an orb: you're in full control
-//     The decision is recomputed at the start of every physics
-//     tick, so it is never a frame out of date when you click.
-// ============================================================
 #include <Geode/Geode.hpp>
 #include <Geode/modify/GJBaseGameLayer.hpp>
 #include <Geode/modify/PlayLayer.hpp>
@@ -100,11 +79,9 @@ static int msToTicks(int64_t ms) {
     return (int)std::clamp(ticks, 1L, 2000L);
 }
 
-// Ground-jump modes. Ship/UFO/wave/swing respond mid-air, so no buffering there.
 static bool isGroundJumpMode(PlayerObject* p) {
     return !p->m_isShip && !p->m_isBird && !p->m_isDart && !p->m_isSwing;
 }
-// Modes where holding (not tapping) is the input.
 static bool isHoldMode(PlayerObject* p) {
     return p->m_isShip || p->m_isDart || p->m_isRobot;
 }
@@ -150,6 +127,32 @@ static void resetInputState() {
     g_smart.blockedClicks = keep.blockedClicks;
     g_smart.p2Separate = keep.p2Separate; // a property of the game, not of the run
 }
+
+// ------------------------------------------------------------
+// simulation types
+// ------------------------------------------------------------
+enum class SimInput { Release, Hold, Tap };
+
+struct PathResult {
+    std::vector<CCPoint> points;
+    bool died = false;
+    bool stopped = false;
+    int deathIndex = -1;
+    int landingIndex = -1;
+};
+
+// One branch (click / no click) for both players.
+struct Run {
+    PathResult p1;
+    PathResult p2;
+    bool hasP2 = false;
+
+    // Does either player die within `horizon` ticks? (either dying ends the attempt)
+    bool diesWithin(int horizon) const {
+        if (p1.died && p1.deathIndex <= horizon) return true;
+        return hasP2 && p2.died && p2.deathIndex <= horizon;
+    }
+};
 
 static void runSmartTick(GJBaseGameLayer* layer); // defined after IBPlayLayer
 
@@ -203,7 +206,7 @@ class $modify(IBPlayerObject, PlayerObject) {
 };
 
 // ------------------------------------------------------------
-// GJBaseGameLayer hooks: input, buffer, ghost side-effect blockers
+// GJBaseGameLayer hooks: input, buffer, click shifting, blockers
 // ------------------------------------------------------------
 class $modify(IBGameLayer, GJBaseGameLayer) {
 public:
@@ -253,6 +256,7 @@ public:
                         return;                // GD is already pressed
                     }
                     if (!s.gdPressed && s.valid && s.pressDies && !s.releaseDies) {
+                        bufferBookkeeping(down, isPlayer1);
                         s.suppressed = true;   // this click would kill you: ignore it
                         s.blockedClicks++;
                         return;
@@ -279,8 +283,11 @@ public:
         GJBaseGameLayer::handleButton(down, button, isPlayer1);
         if (isPlayer1) g_smart.gdPressed = down;
         else g_smart.gdPressed2 = down;
+        bufferBookkeeping(down, isPlayer1);
+    }
 
-        // ---- Input buffer bookkeeping ----
+    void bufferBookkeeping(bool down, bool isPlayer1) {
+        auto& st = isPlayer1 ? g_p1 : g_p2;
         if (!down || !bufferActive()) return;
         auto player = isPlayer1 ? m_player1 : m_player2;
         if (!player || player->m_isDead) return;
@@ -314,6 +321,10 @@ public:
         if (player->m_isOnGround) {
             st.pending = false;
             if (st.held) return; // still holding: GD jumps on landing by itself
+            if (isPlayer1 && g_smartActiveNow && g_smart.valid &&
+                g_smart.pressDies && !g_smart.releaseDies) {
+                return; // the buffered jump would kill you: smart click drops it
+            }
             sendJump(true, isPlayer1);
             st.releaseNextTick = true;
         }
@@ -381,31 +392,8 @@ public:
 };
 
 // ------------------------------------------------------------
-// PlayLayer: ghosts, prediction, smart click, drawing
+// PlayLayer: ghosts, simulation, smart click, drawing, cleanup
 // ------------------------------------------------------------
-enum class SimInput { Release, Hold, Tap };
-
-struct PathResult {
-    std::vector<CCPoint> points;
-    bool died = false;
-    bool stopped = false;
-    int deathIndex = -1;
-    int landingIndex = -1;
-};
-
-// One branch (click / no click) for both players.
-struct Run {
-    PathResult p1;
-    PathResult p2;
-    bool hasP2 = false;
-
-    // Does either player die within `horizon` ticks? (either dying ends the attempt)
-    bool diesWithin(int horizon) const {
-        if (p1.died && p1.deathIndex <= horizon) return true;
-        return hasP2 && p2.died && p2.deathIndex <= horizon;
-    }
-};
-
 class $modify(IBPlayLayer, PlayLayer) {
     struct Fields {
         Ref<CCLayer> ghostRoot;              // hidden parent for all ghosts
@@ -522,6 +510,7 @@ class $modify(IBPlayLayer, PlayLayer) {
         g->m_holdingRight = p->m_holdingRight;
         g->m_leftPressedFirst = p->m_leftPressedFirst;
         g->m_platformerXVelocity = p->m_platformerXVelocity;
+        g->m_isDashing = false;   // we never simulate while the real player dashes
         g->m_isDead = false;
         g->setVisible(false);
     }
@@ -702,7 +691,8 @@ class $modify(IBPlayLayer, PlayLayer) {
         auto real = m_player1;
         bool alive = real && !real->m_isDead && !m_hasCompletedLevel;
         bool dual = m_gameState.m_isDualMode && m_player2;
-        bool usable = smart && alive && !isTouchingOrb(real) && !(dual && isTouchingOrb(m_player2));
+        bool usable = smart && alive && !isTouchingOrb(real) && !real->m_isDashing &&
+                      !(dual && isTouchingOrb(m_player2));
 
         if (!usable && g_smartActiveNow) releaseSmartControl();
         g_smartActiveNow = usable;
@@ -728,7 +718,7 @@ class $modify(IBPlayLayer, PlayLayer) {
         updateLabel(smartWanted());
 
         auto real = m_player1;
-        bool alive = real && !real->m_isDead && !m_hasCompletedLevel;
+        bool alive = real && !real->m_isDead && !m_hasCompletedLevel && !real->m_isDashing;
         if (!alive || !showTraj) return;
         if (!ensureGhosts()) return;
 

@@ -16,10 +16,11 @@ Two ghost copies of your icon run through the game's real physics every frame:
 
 Everything can be changed in the mod settings.
 
-## Smart Click
-Uses the two paths to help you:
-- Your click is **ignored** if clicking dies and not clicking is safe
-- It **clicks for you** if not clicking dies and clicking is safe (holds in ship, wave and robot)
-- If both die, or you're on an orb, you're in full control
+## Click Shifting
+When you click and that click would kill you (and not clicking is safe), the click is held back and registers on the **first physics tick where it's safe**. If it never becomes safe within the Max Delay, it's dropped. In ship, wave and robot it does the same for releases.
 
-A small "Smart Click" label shows in the corner while it's on. It's an auto-play aid, so don't use it for verifying or rated runs.
+It steps aside on orbs and while dashing, so those always react instantly.
+
+**Auto Click** (off by default) also clicks for you when not clicking would kill you.
+
+A small "Smart Click" label shows in the corner while either is on. These are assist features: don't use them for verifying or rated runs.

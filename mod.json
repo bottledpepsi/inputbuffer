@@ -3,11 +3,11 @@
 	"gd": {
 		"win": "2.2081"
 	},
-	"id": "aljishi.input-buffer",
+	"id": "community.input-buffer",
 	"name": "Input Buffer",
-	"version": "v3.1.0",
-	"developer": "aljishi",
-	"description": "Buffer early jumps, preview your trajectory, and Smart Click that avoids deadly clicks.",
+	"version": "v4.0.0",
+	"developer": "Community",
+	"description": "Input buffer, trajectory preview, and click shifting so clicks register on the first safe tick.",
 	"tags": [
 		"gameplay",
 		"utility"
@@ -81,21 +81,35 @@
 		},
 		"smart-title": {
 			"type": "title",
-			"name": "Smart Click"
+			"name": "Click Shifting"
 		},
 		"smart-click": {
 			"type": "bool",
 			"default": true,
-			"name": "Enable Smart Click",
-			"description": "Uses the trajectory: ignores your click if clicking dies and not clicking is safe, and clicks for you if not clicking dies and clicking is safe. If both die, or you're on an orb, you're in control. This is an auto-play aid: don't use it for verifying or rated runs."
+			"name": "Enable Click Shifting",
+			"description": "When a click (or a release, in ship/wave/robot) would kill you and not doing it is safe, it's held back and registers on the first physics tick where it's safe. Turns itself off on orbs and while dashing."
+		},
+		"smart-max-delay": {
+			"type": "int",
+			"default": 150,
+			"min": 10,
+			"max": 500,
+			"name": "Max Delay (ms)",
+			"description": "How long a click can be held back. If it's still deadly after this, it's dropped.",
+			"control": {
+				"slider": true,
+				"slider-step": 10,
+				"arrows": true,
+				"arrow-step": 10
+			}
 		},
 		"smart-click-lookahead": {
 			"type": "int",
-			"default": 350,
+			"default": 300,
 			"min": 50,
-			"max": 1500,
-			"name": "Smart Click Lookahead (ms)",
-			"description": "How far ahead a death has to be for Smart Click to react. Lower = reacts later and closer to the danger; higher = reacts earlier.",
+			"max": 1000,
+			"name": "Lookahead (ms)",
+			"description": "How far ahead to check for death. Higher = safer but more cautious; lower = only reacts to deaths right in front of you.",
 			"control": {
 				"slider": true,
 				"slider-step": 25,
@@ -103,17 +117,23 @@
 				"arrow-step": 25
 			}
 		},
+		"auto-click": {
+			"type": "bool",
+			"default": false,
+			"name": "Auto Click",
+			"description": "Also clicks (or holds) for you when not clicking would kill you and clicking is safe. This plays for you: don't use it for verifying or rated runs."
+		},
 		"smart-click-practice-only": {
 			"type": "bool",
 			"default": false,
-			"name": "Smart Click in Practice Only",
-			"description": "Only use Smart Click in practice mode."
+			"name": "Practice Mode Only",
+			"description": "Only use Click Shifting / Auto Click in practice mode."
 		},
 		"smart-click-indicator": {
 			"type": "bool",
 			"default": true,
 			"name": "Show 'Smart Click' Label",
-			"description": "Shows a small label in the corner while Smart Click is on."
+			"description": "Shows a small label in the corner while Click Shifting or Auto Click is on."
 		}
 	}
 }
