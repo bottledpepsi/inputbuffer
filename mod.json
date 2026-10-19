@@ -5,7 +5,7 @@
 	},
 	"id": "aljishi.input-buffer",
 	"name": "Input Buffer",
-	"version": "v3.0.0",
+	"version": "v3.1.0",
 	"developer": "aljishi",
 	"description": "Buffer early jumps, preview your trajectory, and Smart Click that avoids deadly clicks.",
 	"tags": [

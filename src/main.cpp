@@ -1,17 +1,23 @@
 // ============================================================
-//  Input Buffer v3 (Geode, Windows)
+//  Input Buffer v3.1 (Geode)
 //
 //  1. Input buffer: a jump tapped in the air is replayed on the
 //     physics tick you land, if it was within the buffer window.
-//  2. Trajectory: two invisible "ghost" players are cloned from
-//     you every frame and run through GD's own physics/collision:
+//     The window is counted in physics ticks (not wall-clock),
+//     so lag spikes, pausing and TPS changes don't distort it.
+//  2. Trajectory: invisible "ghost" players are cloned from you
+//     and run through GD's own physics/collision:
 //       green  = path if you click / keep holding
 //       red    = path if you don't click / let go
 //       yellow = part of the red path where a tap gets buffered
+//     Both players are simulated in dual mode, and the held
+//     left/right direction is carried over in platformer levels.
 //  3. Smart Click (uses the two paths):
 //       - your click is ignored if clicking dies and not clicking is safe
 //       - it clicks for you if not clicking dies and clicking is safe
 //       - both die, or you're on an orb: you're in full control
+//     The decision is recomputed at the start of every physics
+//     tick, so it is never a frame out of date when you click.
 // ============================================================
 #include <Geode/Geode.hpp>
 #include <Geode/modify/GJBaseGameLayer.hpp>
