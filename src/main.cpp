@@ -18,7 +18,7 @@
 #include <Geode/modify/PlayLayer.hpp>
 #include <Geode/modify/PlayerObject.hpp>
 #include <algorithm>
-#include <chrono>
+#include <cmath>
 #include <vector>
 
 using namespace geode::prelude;
@@ -72,17 +72,21 @@ static PlayerObject* g_ghostB = nullptr;   // "no click / release" ghost
 static bool g_simulating = false;
 static bool g_ghostStopped = false;        // ghost touched orb/pad/portal
 static bool g_ghostDied = false;
-static float g_lastRealDt = 0.25f;         // dt GD passes to PlayerObject::update per tick
-static uint64_t g_tick = 0;
-static double g_msPerTick = 1000.0 / 240.0;
+
+// GD passes PlayerObject::update a per-step dt measured in 1/60 s units
+// (0.25 at 240 TPS). Ticks are counted by P1's real update calls, so the
+// buffer window and every lookahead are measured in game time.
+static float g_lastRealDt = 0.25f;
+static uint64_t g_physTick = 0;
 
 static bool isGhost(PlayerObject* p) {
     return p && (p == g_ghostA || p == g_ghostB);
 }
 
-static double nowMs() {
-    using namespace std::chrono;
-    return duration<double, std::milli>(steady_clock::now().time_since_epoch()).count();
+static int msToTicks(int64_t ms) {
+    double dt = std::clamp((double)g_lastRealDt, 0.01, 2.0);
+    long ticks = std::lround((double)ms * 60.0 / (1000.0 * dt));
+    return (int)std::clamp(ticks, 1L, 2000L);
 }
 
 // Ground-jump modes. Ship/UFO/wave/swing respond mid-air, so no buffering there.
@@ -102,7 +106,7 @@ static bool isTouchingOrb(PlayerObject* p) {
 // ------------------------------------------------------------
 struct BufferState {
     bool pending = false;
-    double pressTime = 0.0;
+    uint64_t pressTick = 0;
     bool held = false;            // physically held
     bool releaseNextTick = false;
 };
@@ -133,11 +137,14 @@ static void resetInputState() {
 }
 
 // ------------------------------------------------------------
-// PlayerObject hooks: record real dt, mute ghost effects/stats
+// PlayerObject hooks: count real ticks, mute ghost effects/stats
 // ------------------------------------------------------------
 class $modify(IBPlayerObject, PlayerObject) {
     void update(float dt) {
-        if (!g_simulating && !isGhost(this)) g_lastRealDt = dt;
+        if (!g_simulating && !isGhost(this)) {
+            if (dt > 0.f) g_lastRealDt = dt;
+            if (!m_isSecondPlayer) ++g_physTick;
+        }
         PlayerObject::update(dt);
     }
     void incrementJumps() {
@@ -238,7 +245,7 @@ public:
 
         if (!player->m_isOnGround && isGroundJumpMode(player) && !isTouchingOrb(player)) {
             st.pending = true;
-            st.pressTime = nowMs();
+            st.pressTick = g_physTick;
         } else {
             st.pending = false;
         }
@@ -258,7 +265,7 @@ public:
             st.pending = false;
             return;
         }
-        if (nowMs() - st.pressTime > (double)g_cfg.bufferWindow) {
+        if (g_physTick - st.pressTick > (uint64_t)msToTicks(g_cfg.bufferWindow)) {
             st.pending = false;
             return;
         }
@@ -272,7 +279,6 @@ public:
 
     void processCommands(float dt, bool isHalfTick, bool isLastTick) {
         if (!g_simulating) {
-            ++g_tick;
             if (g_smart.tapRelease) {
                 g_smart.tapRelease = false;
                 if (!g_p1.held && !g_smart.autoHeld) sendJump(false, true);
@@ -350,8 +356,6 @@ class $modify(IBPlayLayer, PlayLayer) {
         Ref<PlayerObject> ghostB;
         Ref<CCDrawNode> draw;
         Ref<CCLabelBMFont> label;
-        uint64_t lastTick = 0;
-        double lastTime = 0.0;
     };
 
     void destroyPlayer(PlayerObject* p, GameObject* o) {
@@ -500,22 +504,6 @@ class $modify(IBPlayLayer, PlayLayer) {
         }
     }
 
-    void measureTickRate() {
-        auto f = m_fields.self();
-        double t = nowMs();
-        uint64_t ticks = g_tick - f->lastTick;
-        if (f->lastTime > 0 && ticks > 0) {
-            double sample = (t - f->lastTime) / (double)ticks;
-            if (sample > 0.5 && sample < 50.0) g_msPerTick = g_msPerTick * 0.9 + sample * 0.1;
-        }
-        f->lastTick = g_tick;
-        f->lastTime = t;
-    }
-
-    int msToTicks(int64_t ms) {
-        return std::clamp((int)(ms / g_msPerTick), 1, 1000);
-    }
-
     bool smartWanted() {
         if (!g_cfg.smartClick) return false;
         if (g_cfg.smartPracticeOnly && !m_isPracticeMode) return false;
@@ -650,7 +638,6 @@ class $modify(IBPlayLayer, PlayLayer) {
 
     void postUpdate(float dt) {
         PlayLayer::postUpdate(dt);
-        measureTickRate();
         updatePrediction();
     }
 
