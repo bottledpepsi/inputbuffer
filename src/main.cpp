@@ -117,15 +117,15 @@ struct SmartState {
     bool suppressed = false;      // user is holding but we hid it from GD
     bool autoHeld = false;        // we are holding for the user (hold modes)
     bool tapRelease = false;      // release our auto-tap on the next tick
-    bool pressDies = false;       // last frame: clicking now dies soon
-    bool releaseDies = false;     // last frame: not clicking dies soon
+    bool pressDies = false;       // this tick: clicking now dies soon
+    bool releaseDies = false;     // this tick: not clicking dies soon
     bool valid = false;           // the two flags above are fresh
     int autoClicks = 0;
     int blockedClicks = 0;
 };
 static SmartState g_smart;
 static bool g_injecting = false;
-static bool g_smartActiveNow = false; // set by PlayLayer each frame
+static bool g_smartActiveNow = false; // set once per tick by the smart-click pass
 
 static void resetInputState() {
     g_p1 = {};
@@ -135,6 +135,8 @@ static void resetInputState() {
     g_smart.autoClicks = a;
     g_smart.blockedClicks = b;
 }
+
+static void runSmartTick(GJBaseGameLayer* layer); // defined after IBPlayLayer
 
 // ------------------------------------------------------------
 // PlayerObject hooks: count real ticks, mute ghost effects/stats
@@ -278,13 +280,14 @@ public:
     }
 
     void processCommands(float dt, bool isHalfTick, bool isLastTick) {
-        if (!g_simulating) {
+        if (!g_simulating && !m_isEditor) {
             if (g_smart.tapRelease) {
                 g_smart.tapRelease = false;
                 if (!g_p1.held && !g_smart.autoHeld) sendJump(false, true);
             }
             tickBuffer(true);
             if (m_gameState.m_isDualMode) tickBuffer(false);
+            runSmartTick(this); // fresh decision right before this tick's inputs
         }
         GJBaseGameLayer::processCommands(dt, isHalfTick, isLastTick);
     }
@@ -602,40 +605,54 @@ class $modify(IBPlayLayer, PlayLayer) {
         s.valid = false;
     }
 
-    // ---------- per frame ----------
+    // ---------- once per physics tick ----------
+    void smartTick() {
+        bool smart = smartWanted();
+        auto real = m_player1;
+        bool alive = real && !real->m_isDead && !m_hasCompletedLevel;
+        bool usable = smart && alive && !isTouchingOrb(real);
+
+        if (!usable && g_smartActiveNow) releaseSmartControl();
+        g_smartActiveNow = usable;
+        if (!usable) return;
+
+        if (!ensureGhosts()) {
+            g_smartActiveNow = false;
+            return;
+        }
+        auto f = m_fields.self();
+        int horizon = msToTicks(g_cfg.smartLookahead);
+
+        // A = click (or keep holding if GD is pressed), B = no click / let go
+        SimInput aInput = g_smart.gdPressed ? SimInput::Hold
+                        : (isHoldMode(real) ? SimInput::Hold : SimInput::Tap);
+        auto b = simulate(f->ghostB, real, SimInput::Release, horizon);
+        auto a = simulate(f->ghostA, real, aInput, horizon);
+        applySmartClick(real, a, b, horizon);
+    }
+
+    // ---------- once per frame: label + trajectory drawing ----------
     void updatePrediction() {
         auto f = m_fields.self();
         if (f->draw) f->draw->clear();
 
         bool showTraj = g_cfg.showTrajectory &&
             !(g_cfg.trajectoryPracticeOnly && !m_isPracticeMode);
-        bool smart = smartWanted();
-        updateLabel(smart);
+        updateLabel(smartWanted());
 
         auto real = m_player1;
         bool alive = real && !real->m_isDead && !m_hasCompletedLevel;
-        bool smartUsable = smart && alive && !isTouchingOrb(real);
-
-        if (!smartUsable && g_smartActiveNow) releaseSmartControl();
-        g_smartActiveNow = smartUsable;
-
-        if (!alive || (!showTraj && !smart)) return;
-
+        if (!alive || !showTraj) return;
         if (!ensureGhosts()) return;
 
-        int drawSteps = showTraj ? msToTicks(g_cfg.trajectoryLength) : 0;
-        int horizon = msToTicks(g_cfg.smartLookahead);
-        int steps = std::max(drawSteps, smart ? horizon : 0);
+        int drawSteps = msToTicks(g_cfg.trajectoryLength);
 
         // A = click (or keep holding if GD is pressed), B = no click / let go
         SimInput aInput = g_smart.gdPressed ? SimInput::Hold
                         : (isHoldMode(real) ? SimInput::Hold : SimInput::Tap);
-        auto b = simulate(f->ghostB, real, SimInput::Release, steps);
-        auto a = simulate(f->ghostA, real, aInput, steps);
+        auto b = simulate(f->ghostB, real, SimInput::Release, drawSteps);
+        auto a = simulate(f->ghostA, real, aInput, drawSteps);
 
-        if (smartUsable) applySmartClick(real, a, b, horizon);
-
-        if (!showTraj) return;
         auto d = f->draw.data();
         drawPath(d, b, ccc4f(1.f, 0.3f, 0.3f, 0.85f), 0, drawSteps);
         drawPath(d, a, ccc4f(0.3f, 1.f, 0.4f, 0.9f), 0, drawSteps);
@@ -664,3 +681,9 @@ class $modify(IBPlayLayer, PlayLayer) {
         resetInputState();
     }
 };
+
+static void runSmartTick(GJBaseGameLayer* layer) {
+    auto pl = PlayLayer::get();
+    if (!pl || static_cast<GJBaseGameLayer*>(pl) != layer) return;
+    static_cast<IBPlayLayer*>(pl)->smartTick();
+}
