@@ -352,10 +352,18 @@ struct PathResult {
 
 class $modify(IBPlayLayer, PlayLayer) {
     struct Fields {
+        Ref<CCLayer> ghostRoot;              // hidden parent for all ghosts
         Ref<PlayerObject> ghostA;
         Ref<PlayerObject> ghostB;
         Ref<CCDrawNode> draw;
         Ref<CCLabelBMFont> label;
+
+        // Never leave dangling raw pointers in the globals when this layer dies.
+        ~Fields() {
+            if (g_ghostA == ghostA.data()) g_ghostA = nullptr;
+            if (g_ghostB == ghostB.data()) g_ghostB = nullptr;
+            g_smartActiveNow = false;
+        }
     };
 
     void destroyPlayer(PlayerObject* p, GameObject* o) {
@@ -376,14 +384,15 @@ class $modify(IBPlayLayer, PlayLayer) {
 
     // ---------- ghosts ----------
     PlayerObject* makeGhost() {
-        auto layer = m_objectLayer;
-        auto before = layer->getChildrenCount();
-        auto ghost = PlayerObject::create(1, 1, this, layer, false);
+        auto f = m_fields.self();
+        auto before = m_objectLayer->getChildrenCount();
+        auto ghost = PlayerObject::create(1, 1, this, f->ghostRoot, false);
         if (!ghost) return nullptr;
         ghost->m_playEffects = false;
-        layer->addChild(ghost);
+        f->ghostRoot->addChild(ghost);
         ghost->setVisible(false);
-        auto children = layer->getChildren();
+        // anything the constructor attached to the real object layer stays hidden too
+        auto children = m_objectLayer->getChildren();
         for (auto i = before; children && i < children->count(); i++) {
             if (auto node = typeinfo_cast<CCNode*>(children->objectAtIndex(i))) node->setVisible(false);
         }
@@ -392,17 +401,25 @@ class $modify(IBPlayLayer, PlayLayer) {
         return ghost;
     }
 
-    void ensureGhosts() {
+    bool ensureGhosts() {
         auto f = m_fields.self();
-        if (!f->ghostA) f->ghostA = makeGhost();
-        if (!f->ghostB) f->ghostB = makeGhost();
+        if (!f->ghostRoot) {
+            auto root = CCLayer::create();
+            if (!root) return false;
+            root->setVisible(false);   // hides every ghost and everything they spawn
+            m_objectLayer->addChild(root);
+            f->ghostRoot = root;
+        }
         if (!f->draw) {
             f->draw = CCDrawNode::create();
             f->draw->setZOrder(9999);
             m_objectLayer->addChild(f->draw);
         }
+        if (!f->ghostA) f->ghostA = makeGhost();
+        if (!f->ghostB) f->ghostB = makeGhost();
         g_ghostA = f->ghostA;
         g_ghostB = f->ghostB;
+        return f->ghostA != nullptr && f->ghostB != nullptr && f->draw != nullptr;
     }
 
     static void syncMode(PlayerObject* g, PlayerObject* p) {
@@ -604,8 +621,7 @@ class $modify(IBPlayLayer, PlayLayer) {
 
         if (!alive || (!showTraj && !smart)) return;
 
-        ensureGhosts();
-        if (!f->ghostA || !f->ghostB || !f->draw) return;
+        if (!ensureGhosts()) return;
 
         int drawSteps = showTraj ? msToTicks(g_cfg.trajectoryLength) : 0;
         int horizon = msToTicks(g_cfg.smartLookahead);
