@@ -24,6 +24,45 @@
 using namespace geode::prelude;
 
 // ------------------------------------------------------------
+// cached settings (read once, updated by listeners)
+// ------------------------------------------------------------
+struct Config {
+    bool enabled = true;
+    int64_t bufferWindow = 150;
+    bool platformerOnly = false;
+    bool showTrajectory = true;
+    int64_t trajectoryLength = 1000;
+    bool showBufferZone = true;
+    bool trajectoryPracticeOnly = false;
+    bool smartClick = true;
+    int64_t smartLookahead = 350;
+    bool smartPracticeOnly = false;
+    bool smartIndicator = true;
+};
+static Config g_cfg;
+
+template <class T, class V>
+static void bindSetting(char const* key, V& target) {
+    target = static_cast<V>(Mod::get()->getSettingValue<T>(key));
+    V* ptr = &target; // g_cfg is static, so this outlives the listener
+    listenForSettingChanges<T>(key, [ptr](T value) { *ptr = static_cast<V>(value); });
+}
+
+$on_mod(Loaded) {
+    bindSetting<bool>("enabled", g_cfg.enabled);
+    bindSetting<int64_t>("buffer-window", g_cfg.bufferWindow);
+    bindSetting<bool>("platformer-only", g_cfg.platformerOnly);
+    bindSetting<bool>("show-trajectory", g_cfg.showTrajectory);
+    bindSetting<int64_t>("trajectory-length", g_cfg.trajectoryLength);
+    bindSetting<bool>("show-buffer-zone", g_cfg.showBufferZone);
+    bindSetting<bool>("trajectory-practice-only", g_cfg.trajectoryPracticeOnly);
+    bindSetting<bool>("smart-click", g_cfg.smartClick);
+    bindSetting<int64_t>("smart-click-lookahead", g_cfg.smartLookahead);
+    bindSetting<bool>("smart-click-practice-only", g_cfg.smartPracticeOnly);
+    bindSetting<bool>("smart-click-indicator", g_cfg.smartIndicator);
+}
+
+// ------------------------------------------------------------
 // shared state
 // ------------------------------------------------------------
 static constexpr int JUMP = 1;
@@ -44,11 +83,6 @@ static bool isGhost(PlayerObject* p) {
 static double nowMs() {
     using namespace std::chrono;
     return duration<double, std::milli>(steady_clock::now().time_since_epoch()).count();
-}
-
-template <class T>
-static T setting(char const* key) {
-    return Mod::get()->getSettingValue<T>(key);
 }
 
 // Ground-jump modes. Ship/UFO/wave/swing respond mid-air, so no buffering there.
@@ -149,9 +183,9 @@ class $modify(IBPlayerObject, PlayerObject) {
 // ------------------------------------------------------------
 class $modify(IBGameLayer, GJBaseGameLayer) {
     bool bufferActive() {
-        if (!setting<bool>("enabled")) return false;
+        if (!g_cfg.enabled) return false;
         if (m_isEditor) return false;
-        if (setting<bool>("platformer-only") && !m_isPlatformer) return false;
+        if (g_cfg.platformerOnly && !m_isPlatformer) return false;
         return true;
     }
 
@@ -224,7 +258,7 @@ public:
             st.pending = false;
             return;
         }
-        if (nowMs() - st.pressTime > (double)setting<int64_t>("buffer-window")) {
+        if (nowMs() - st.pressTime > (double)g_cfg.bufferWindow) {
             st.pending = false;
             return;
         }
@@ -483,15 +517,15 @@ class $modify(IBPlayLayer, PlayLayer) {
     }
 
     bool smartWanted() {
-        if (!setting<bool>("smart-click")) return false;
-        if (setting<bool>("smart-click-practice-only") && !m_isPracticeMode) return false;
+        if (!g_cfg.smartClick) return false;
+        if (g_cfg.smartPracticeOnly && !m_isPracticeMode) return false;
         if (m_gameState.m_isDualMode) return false; // player 1 only
         return true;
     }
 
     void updateLabel(bool smartOn) {
         auto f = m_fields.self();
-        bool show = smartOn && setting<bool>("smart-click-indicator");
+        bool show = smartOn && g_cfg.smartIndicator;
         if (!f->label) {
             if (!show) return;
             f->label = CCLabelBMFont::create("Smart Click", "bigFont.fnt");
@@ -568,8 +602,8 @@ class $modify(IBPlayLayer, PlayLayer) {
         auto f = m_fields.self();
         if (f->draw) f->draw->clear();
 
-        bool showTraj = setting<bool>("show-trajectory") &&
-            !(setting<bool>("trajectory-practice-only") && !m_isPracticeMode);
+        bool showTraj = g_cfg.showTrajectory &&
+            !(g_cfg.trajectoryPracticeOnly && !m_isPracticeMode);
         bool smart = smartWanted();
         updateLabel(smart);
 
@@ -585,8 +619,8 @@ class $modify(IBPlayLayer, PlayLayer) {
         ensureGhosts();
         if (!f->ghostA || !f->ghostB || !f->draw) return;
 
-        int drawSteps = showTraj ? msToTicks(setting<int64_t>("trajectory-length")) : 0;
-        int horizon = msToTicks(setting<int64_t>("smart-click-lookahead"));
+        int drawSteps = showTraj ? msToTicks(g_cfg.trajectoryLength) : 0;
+        int horizon = msToTicks(g_cfg.smartLookahead);
         int steps = std::max(drawSteps, smart ? horizon : 0);
 
         // A = click (or keep holding if GD is pressed), B = no click / let go
@@ -602,10 +636,10 @@ class $modify(IBPlayLayer, PlayLayer) {
         drawPath(d, b, ccc4f(1.f, 0.3f, 0.3f, 0.85f), 0, drawSteps);
         drawPath(d, a, ccc4f(0.3f, 1.f, 0.4f, 0.9f), 0, drawSteps);
 
-        if (setting<bool>("show-buffer-zone") && setting<bool>("enabled") &&
+        if (g_cfg.showBufferZone && g_cfg.enabled &&
             b.landingIndex > 0 && b.landingIndex <= drawSteps &&
             isGroundJumpMode(real) && !real->m_isOnGround) {
-            int start = b.landingIndex - msToTicks(setting<int64_t>("buffer-window"));
+            int start = b.landingIndex - msToTicks(g_cfg.bufferWindow);
             auto yellow = ccc4f(1.f, 0.9f, 0.2f, 1.f);
             drawPath(d, b, yellow, start, b.landingIndex);
             d->drawDot(b.points[b.landingIndex], 3.f, yellow);
